@@ -3,6 +3,8 @@ const SHEET_URL = "https://docs.google.com/spreadsheets/d/16c8sgm2ePGyv5rmmfudxB
 
 const TAB = "MTD";
 
+const ACCOUNT_LABEL = "CM - Kurt";
+
 const QUERY = `
 SELECT 
     campaign.id,
@@ -51,7 +53,7 @@ function main() {
     let rowIndex = 2; // Start after headers
     
     // Get accounts with the specified label
-    const accountIterator = MccApp.accounts().withCondition("LabelNames CONTAINS 'CM - Kurt'").get();
+    const accountIterator = MccApp.accounts().withCondition("LabelNames CONTAINS '" + ACCOUNT_LABEL + "'").get();
     
     while (accountIterator.hasNext()) {
         try {
