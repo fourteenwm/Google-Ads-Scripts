@@ -1,14 +1,17 @@
 // Google Ads Script: MCC Asset Status Reporter
-// Description: This script fetches the status of all assets (ad extensions) 
+// Description: This script fetches the status of all active assets (ad extensions) 
 // for Google Ads accounts under an MCC, filtered by a specific account label.
-// Data is exported to a single Google Sheet, with results written per account.
-// Version: 1.0
+// Only processes accounts with cost > 0 in the last 30 days to focus on active accounts.
+// Removed assets are automatically filtered out to focus on actionable items.
+// Data is exported to a single Google Sheet, with results written incrementally per account
+// to prevent memory issues with large numbers of accounts.
+// Version: 1.4
 // Author: AI Assistant (adapted from single-account script and mcc-neg-keyword-conflict.js)
 
 // --- Configuration ---
 // Optional: Specify the URL of the Google Sheet. If blank, a new sheet is created.
-const SHEET_URL = ''; // <-- Replace with your sheet URL if desired
-const TAB_NAME = 'MCC Asset Status Report';
+const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1gub008yXM1peJEfs1eKVIItzjnt3FS-QXFSoEfCG5Yk/edit?gid=1778948609#gid=1778948609'; // <-- Replace with your sheet URL if desired
+const TAB_NAME = 'MCC Asset Status Report v2';
 // Specify the account label to filter which accounts are processed.
 const ACCOUNT_LABEL = 'CM - Kurt'; // <-- Replace with your desired account label
 const HEADERS = [
@@ -17,18 +20,20 @@ const HEADERS = [
     'Asset ID',
     'Asset Name',
     'Asset Type',
-    'Eligibility Status',
+    'Asset Status',
+    'Policy Approval Status',
+    'Policy Review Status',
     'Disapproval Details'
 ];
 
 // GAQL Query (runs within each selected account's context)
-// Fetches asset details along with the status from customer_asset linking.
-// customer.id and customer.descriptive_name will refer to the child account being processed.
+// Fetches asset details along with both basic status and policy information
 const GAQL_QUERY = `
   SELECT
     asset.id,
     asset.name,
     asset.type,
+    customer_asset.status,
     asset.policy_summary.approval_status,
     asset.policy_summary.review_status,
     asset.policy_summary.policy_topic_entries,
@@ -52,14 +57,16 @@ function main() {
 
     const accountSelector = MccApp.accounts()
         .withCondition(`LabelNames CONTAINS "${ACCOUNT_LABEL}"`)
+        .withCondition('Cost > 0')
+        .forDateRange('LAST_30_DAYS')
         .get();
 
     const totalAccounts = accountSelector.totalNumEntities();
-    Logger.log(`Found ${totalAccounts} accounts with label "${ACCOUNT_LABEL}".`);
+    Logger.log(`Found ${totalAccounts} accounts with label "${ACCOUNT_LABEL}" that have cost > 0 in the last 30 days.`);
 
     if (totalAccounts === 0) {
         Logger.log('No accounts to process. Script will exit.');
-        sheet.getRange('A2').setValue('No accounts found with the specified label.');
+        sheet.getRange('A2').setValue('No accounts found with the specified label that have cost > 0 in the last 30 days.');
         return;
     }
 
@@ -85,7 +92,7 @@ function main() {
                 accountName,
                 'Critical Error processing account',
                 e.message.substring(0, 500), // Limit error message length
-                '', '', ''
+                '', '', '', '', ''
             ]];
             writeToSheet(sheet, errorRowData);
         } finally {
@@ -95,8 +102,10 @@ function main() {
         }
     }
 
-    Logger.log(`Finished processing all ${totalAccounts} targeted accounts. Results available at: ${ss.getUrl()}`);
-    Logger.log('MCC script finished.');
+    Logger.log(`✓ Finished processing all ${totalAccounts} targeted accounts.`);
+    Logger.log(`📊 Results available at: ${ss.getUrl()}`);
+    Logger.log(`📋 Tab name: "${TAB_NAME}"`);
+    Logger.log('🎯 MCC script finished successfully.');
 }
 
 // --- Per-Account Processing Logic ---
@@ -117,11 +126,21 @@ function processAccount(sheet, gadsAccountObject) {
         let assetsFoundInAccount = false;
 
         while (iterator.hasNext()) {
-            assetsFoundInAccount = true;
             rowCount++;
             let row = iterator.next(); // Define row outside try-catch for error logging if needed
 
             try {
+                // Check if asset is active (not removed) before processing
+                const customerAssetStatus = row.customerAsset ? row.customerAsset.status : 'Unknown';
+                
+                // Skip removed assets - only process active assets
+                if (customerAssetStatus === 'REMOVED') {
+                    Logger.log(`Skipping removed asset ID: ${row.asset ? row.asset.id : 'Unknown'}`);
+                    continue; // Skip to next asset
+                }
+
+                assetsFoundInAccount = true; // Only set to true if we find active assets
+
                 // customer.id and customer.descriptiveName from GAQL are the account's ID and Name
                 const accountId = row.customer && row.customer.id !== undefined ? row.customer.id.toString() : gadsAccountObject.getCustomerId();
                 const accountName = row.customer && row.customer.descriptiveName !== undefined ? row.customer.descriptiveName : gadsAccountObject.getName();
@@ -129,26 +148,28 @@ function processAccount(sheet, gadsAccountObject) {
                 const assetName = row.asset && row.asset.name !== undefined ? row.asset.name : 'N/A';
                 const assetType = row.asset && row.asset.type !== undefined ? row.asset.type : 'N/A';
                 
-                let eligibilityStatus = 'Unknown';
+                let assetStatus = customerAssetStatus;
+                let policyApprovalStatus = 'Unknown';
+                let policyReviewStatus = 'Unknown';
                 let disapprovalDetails = '';
 
                 if (row.asset && row.asset.policySummary) {
-                    const approvalStatus = row.asset.policySummary.approvalStatus;
-                    const reviewStatus = row.asset.policySummary.reviewStatus;
+                    policyApprovalStatus = row.asset.policySummary.approvalStatus;
+                    policyReviewStatus = row.asset.policySummary.reviewStatus;
 
-                    if (approvalStatus === 'APPROVED') {
-                        eligibilityStatus = 'Eligible';
-                    } else if (approvalStatus === 'DISAPPROVED') {
-                        eligibilityStatus = 'Not eligible';
+                    if (policyApprovalStatus === 'APPROVED') {
+                        policyApprovalStatus = 'Eligible';
+                    } else if (policyApprovalStatus === 'DISAPPROVED') {
+                        policyApprovalStatus = 'Not eligible';
                         const policyTopics = row.asset.policySummary.policyTopicEntries;
                         if (policyTopics && policyTopics.length > 0) {
                             const reasons = policyTopics.map(entry => entry.topic || 'Unknown reason').join('; ');
                             disapprovalDetails = `Disapproved (${reasons})`;
                         }
-                    } else if (approvalStatus === 'UNDER_REVIEW' || reviewStatus === 'UNDER_REVIEW') {
-                        eligibilityStatus = 'Under Review';
-                    } else if (approvalStatus === 'AREA_OF_INTEREST_ONLY') {
-                        eligibilityStatus = 'Eligible (Area of Interest)';
+                    } else if (policyApprovalStatus === 'UNDER_REVIEW' || policyReviewStatus === 'UNDER_REVIEW') {
+                        policyApprovalStatus = 'Under Review';
+                    } else if (policyApprovalStatus === 'AREA_OF_INTEREST_ONLY') {
+                        policyApprovalStatus = 'Eligible (Area of Interest)';
                     } // Other statuses will remain 'Unknown' or could be mapped if known
                 }
 
@@ -158,7 +179,9 @@ function processAccount(sheet, gadsAccountObject) {
                     assetId,
                     assetName,
                     assetType,
-                    eligibilityStatus,
+                    assetStatus,
+                    policyApprovalStatus,
+                    policyReviewStatus,
                     disapprovalDetails
                 ]);
             } catch (e) {
@@ -170,23 +193,30 @@ function processAccount(sheet, gadsAccountObject) {
                     row.asset && row.asset.id ? row.asset.id.toString() : 'Error in Row',
                     'Error processing row data',
                     e.message.substring(0, 100),
+                    'Error',
+                    'Error',
+                    'Error',
                     JSON.stringify(row).substring(0,100)
                 ]);
             }
         }
-        Logger.log(`Processed ${rowCount} assets for account ${gadsAccountObject.getName()}.`);
+        Logger.log(`Processed ${rowCount} total assets for account ${gadsAccountObject.getName()}.`);
+        Logger.log(`Found ${accountReportData.length} active assets (removed assets were filtered out).`);
 
+        // Write data for this account immediately to prevent memory issues
         if (accountReportData.length > 0) {
             writeToSheet(sheet, accountReportData);
+            Logger.log(`✓ Wrote ${accountReportData.length} assets for account ${gadsAccountObject.getName()} to sheet.`);
         } else if (!assetsFoundInAccount) {
             // No assets found for this specific account after a successful query execution
             Logger.log(`No assets found for account ${gadsAccountObject.getName()}.`);
             const noAssetsRow = [[
                 gadsAccountObject.getCustomerId(),
                 gadsAccountObject.getName(),
-                'No assets found in this account', '', '', '', ''
+                'No assets found in this account', '', '', '', '', '', ''
             ]];
             writeToSheet(sheet, noAssetsRow);
+            Logger.log(`✓ Wrote "no assets" row for account ${gadsAccountObject.getName()} to sheet.`);
         }
         // If assetsFoundInAccount is true but accountReportData is empty, it means all rows had errors.
 
@@ -197,7 +227,7 @@ function processAccount(sheet, gadsAccountObject) {
             gadsAccountObject.getName(),
             'Error executing/processing GAQL query for account',
             e.message.substring(0, 500), // Limit error message length
-            '', '', ''
+            '', '', '', '', ''
         ]];
         writeToSheet(sheet, queryErrorRow);
     }
