@@ -68,7 +68,7 @@ function main() {
     
     // Update run state
     const currentRow = lastProcessedRow + i + batch.length;
-    updateRunState(runStateSheet, currentRow);
+    updateRunState(runStateSheet, currentRow, batchResults);
     
     Logger.log(`Batch processed: ${batchResults.processed} successful, ${batchResults.errors} errors`);
     
@@ -328,13 +328,14 @@ function createCampaign(campaignData) {
     if (!campaign && typeof AdWordsApp.bulkUploads === 'function') {
       try {
         Logger.log('Trying bulk upload method...');
-        const columns = ['Campaign', 'Budget', 'Bid Strategy type'];
+        const columns = ['Campaign', 'Campaign type', 'Budget', 'Bid Strategy type'];
         const upload = AdWordsApp.bulkUploads().newCsvUpload(columns, {moneyInMicros: false});
         
         const params = {
           'Campaign': campaignData.campaignName,
+          'Campaign type': campaignData.campaignType,
           'Budget': campaignData.dailyBudget,
-          'Bid Strategy type': getBidStrategyType(campaignData.biddingStrategy)
+          'Bid Strategy type': getBidStrategyForBulkUpload(campaignData.biddingStrategy)
         };
         
         upload.append(params);
@@ -695,13 +696,13 @@ function resetRunState(runStateSheet) {
   Logger.log('Run state reset to start from beginning');
 }
 
-function updateRunState(runStateSheet, lastProcessedRow) {
+function updateRunState(runStateSheet, lastProcessedRow, batchResults) {
   const currentTime = new Date().toISOString();
   const totalProcessed = runStateSheet.getRange(2, 3).getValue() || 0;
   const totalErrors = runStateSheet.getRange(2, 4).getValue() || 0;
   
   runStateSheet.getRange(2, 1, 1, 4).setValues([
-    [lastProcessedRow, currentTime, totalProcessed + BATCH_SIZE, totalErrors]
+    [lastProcessedRow, currentTime, totalProcessed + batchResults.processed, totalErrors + batchResults.errors]
   ]);
 }
 
@@ -740,6 +741,25 @@ function getBidStrategyType(biddingStrategy) {
       return 'maximize_clicks';
     default:
       return 'cpc';
+  }
+}
+
+function getBidStrategyForBulkUpload(biddingStrategy) {
+  if (!biddingStrategy) return 'Manual CPC';
+  
+  const strategy = biddingStrategy.toUpperCase().replace(/_/g, ' ');
+  switch (strategy) {
+    case 'MAXIMIZE CONVERSIONS':
+      return 'Maximize conversions';
+    case 'TARGET CPA':
+      return 'Target CPA';
+    case 'MANUAL CPC':
+      return 'Manual CPC';
+    case 'MAXIMIZE CLICKS':
+      return 'Maximize clicks';
+    default:
+      // Return the original string with words capitalized, as a best guess
+      return biddingStrategy.replace(/_/g, ' ').toLowerCase().split(' ').map(s => s.charAt(0).toUpperCase() + s.substring(1)).join(' ');
   }
 }
 
@@ -803,6 +823,18 @@ function getLocationCode(locationTargeting) {
   return 'US';
 }
 
+function formatDateForAds(date) {
+  if (!date) return null;
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return null;
+  
+  const year = d.getFullYear();
+  const month = ('0' + (d.getMonth() + 1)).slice(-2);
+  const day = ('0' + d.getDate()).slice(-2);
+  
+  return `${year}${month}${day}`;
+}
+
 function setAdditionalPropertiesAfterCreation(campaign, campaignData) {
   try {
     // Set campaign status
@@ -813,30 +845,25 @@ function setAdditionalPropertiesAfterCreation(campaign, campaignData) {
     
     // Set start and end dates if provided
     if (campaignData.startDate) {
-      campaign.setStartDate(new Date(campaignData.startDate));
-      Logger.log(`Set start date to ${campaignData.startDate}`);
+      const formattedStartDate = formatDateForAds(campaignData.startDate);
+      if (formattedStartDate) {
+        campaign.setStartDate(formattedStartDate);
+        Logger.log(`Set start date to ${formattedStartDate}`);
+      }
     }
     
     if (campaignData.endDate) {
-      campaign.setEndDate(new Date(campaignData.endDate));
-      Logger.log(`Set end date to ${campaignData.endDate}`);
+      const formattedEndDate = formatDateForAds(campaignData.endDate);
+      if (formattedEndDate) {
+        campaign.setEndDate(formattedEndDate);
+        Logger.log(`Set end date to ${formattedEndDate}`);
+      }
     }
     
     // Set tracking template if provided
     if (campaignData.trackingTemplate) {
       campaign.setTrackingTemplate(campaignData.trackingTemplate);
       Logger.log(`Set tracking template: ${campaignData.trackingTemplate}`);
-    }
-    
-    // Set campaign labels if provided
-    if (campaignData.campaignLabels) {
-      const labels = campaignData.campaignLabels.split(',').map(label => label.trim());
-      for (const label of labels) {
-        if (label) {
-          campaign.createLabel(label);
-          Logger.log(`Added label: ${label}`);
-        }
-      }
     }
     
     Logger.log(`Additional properties set for campaign "${campaign.getName()}"`);
